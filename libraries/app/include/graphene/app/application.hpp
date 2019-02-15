@@ -38,8 +38,7 @@ namespace graphene { namespace app {
    class application_options
    {
       public:
-         // TODO change default to false when GUI is ready
-         bool enable_subscribe_to_all = true;
+         bool enable_subscribe_to_all = false;
          bool has_market_history_plugin = false;
    };
 
@@ -82,7 +81,7 @@ namespace graphene { namespace app {
          {
             std::shared_ptr<abstract_plugin> abs_plugin = get_plugin( name );
             std::shared_ptr<PluginType> result = std::dynamic_pointer_cast<PluginType>( abs_plugin );
-            FC_ASSERT( result != std::shared_ptr<PluginType>() );
+            FC_ASSERT( result != std::shared_ptr<PluginType>(), "Unable to load plugin '${p}'", ("p",name) );
             return result;
          }
 

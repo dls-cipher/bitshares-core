@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Cryptonomex, Inc., and contributors.
+ * Copyright (c) 2018 Lubos Ilcik, and contributors.
  *
  * The MIT License
  *
@@ -22,10 +22,13 @@
  * THE SOFTWARE.
  */
 #pragma once
-#include <fc/crypto/sha512.hpp>
 
-namespace graphene { namespace utilities {
+#include <fc/filesystem.hpp>
+#include <boost/program_options.hpp>
 
-void set_random_seed_for_testing(const fc::sha512& new_seed);
+namespace graphene { namespace app {
 
-} } // end namespace graphene::utilities
+   void load_configuration_options(const fc::path &data_dir, const boost::program_options::options_description &cfg_options,
+                           boost::program_options::variables_map &options);
+
+} } // graphene::app
