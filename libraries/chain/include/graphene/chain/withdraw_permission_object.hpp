@@ -22,11 +22,15 @@
  * THE SOFTWARE.
  */
 #pragma once
-#include <graphene/chain/protocol/authority.hpp>
+
+#include <graphene/protocol/asset.hpp>
 #include <graphene/db/generic_index.hpp>
+
 #include <boost/multi_index/composite_key.hpp>
 
 namespace graphene { namespace chain {
+   using namespace graphene::protocol;
+
   /**
    * @class withdraw_permission_object
    * @brief Grants another account authority to withdraw a limited amount of funds per interval
@@ -40,8 +44,8 @@ namespace graphene { namespace chain {
   class withdraw_permission_object : public graphene::db::abstract_object<withdraw_permission_object>
   {
      public:
-        static const uint8_t space_id = protocol_ids;
-        static const uint8_t type_id  = withdraw_permission_object_type;
+        static constexpr uint8_t space_id = protocol_ids;
+        static constexpr uint8_t type_id  = withdraw_permission_object_type;
 
         /// The account authorizing @ref authorized_account to withdraw from it
         account_id_type    withdraw_from_account;
@@ -113,12 +117,8 @@ namespace graphene { namespace chain {
 
 } } // graphene::chain
 
-FC_REFLECT_DERIVED( graphene::chain::withdraw_permission_object, (graphene::db::object),
-                    (withdraw_from_account)
-                    (authorized_account)
-                    (withdrawal_limit)
-                    (withdrawal_period_sec)
-                    (period_start_time)
-                    (expiration)
-                    (claimed_this_period)
-                 )
+MAP_OBJECT_ID_TO_TYPE(graphene::chain::withdraw_permission_object)
+
+FC_REFLECT_TYPENAME( graphene::chain::withdraw_permission_object )
+
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::withdraw_permission_object )

@@ -32,10 +32,7 @@
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
 
-#include <graphene/chain/protocol/market.hpp>
-
-#include <fc/uint128.hpp>
-#include <fc/smart_ref_impl.hpp>
+#include <graphene/protocol/market.hpp>
 
 namespace graphene { namespace chain {
 void_result limit_order_create_evaluator::do_evaluate(const limit_order_create_operation& op)
@@ -49,15 +46,32 @@ void_result limit_order_create_evaluator::do_evaluate(const limit_order_create_o
    _receive_asset = &op.min_to_receive.asset_id(d);
 
    if( _sell_asset->options.whitelist_markets.size() )
-      FC_ASSERT( _sell_asset->options.whitelist_markets.find(_receive_asset->id) != _sell_asset->options.whitelist_markets.end() );
+   {
+      GRAPHENE_ASSERT( _sell_asset->options.whitelist_markets.find(_receive_asset->id)
+                          != _sell_asset->options.whitelist_markets.end(),
+                       limit_order_create_market_not_whitelisted,
+                       "This market has not been whitelisted by the selling asset", );
+   }
    if( _sell_asset->options.blacklist_markets.size() )
-      FC_ASSERT( _sell_asset->options.blacklist_markets.find(_receive_asset->id) == _sell_asset->options.blacklist_markets.end() );
+   {
+      GRAPHENE_ASSERT( _sell_asset->options.blacklist_markets.find(_receive_asset->id)
+                          == _sell_asset->options.blacklist_markets.end(),
+                       limit_order_create_market_blacklisted,
+                       "This market has been blacklisted by the selling asset", );
+   }
 
-   FC_ASSERT( is_authorized_asset( d, *_seller, *_sell_asset ) );
-   FC_ASSERT( is_authorized_asset( d, *_seller, *_receive_asset ) );
+   GRAPHENE_ASSERT( is_authorized_asset( d, *_seller, *_sell_asset ),
+                    limit_order_create_selling_asset_unauthorized,
+                    "The account is not allowed to transact the selling asset", );
 
-   FC_ASSERT( d.get_balance( *_seller, *_sell_asset ) >= op.amount_to_sell, "insufficient balance",
-              ("balance",d.get_balance(*_seller,*_sell_asset))("amount_to_sell",op.amount_to_sell) );
+   GRAPHENE_ASSERT( is_authorized_asset( d, *_seller, *_receive_asset ),
+                    limit_order_create_receiving_asset_unauthorized,
+                    "The account is not allowed to transact the receiving asset", );
+
+   GRAPHENE_ASSERT( d.get_balance( *_seller, *_sell_asset ) >= op.amount_to_sell,
+                    limit_order_create_insufficient_balance,
+                    "insufficient balance",
+                    ("balance",d.get_balance(*_seller,*_sell_asset))("amount_to_sell",op.amount_to_sell) );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
@@ -92,13 +106,12 @@ void limit_order_create_evaluator::pay_fee()
 
 object_id_type limit_order_create_evaluator::do_apply(const limit_order_create_operation& op)
 { try {
-   const auto& seller_stats = _seller->statistics(db());
-   db().modify(seller_stats, [&](account_statistics_object& bal) {
-         if( op.amount_to_sell.asset_id == asset_id_type() )
-         {
-            bal.total_core_in_orders += op.amount_to_sell.amount;
-         }
-   });
+   if( op.amount_to_sell.asset_id == asset_id_type() )
+   {
+      db().modify( _seller->statistics(db()), [&op](account_statistics_object& bal) {
+         bal.total_core_in_orders += op.amount_to_sell.amount;
+      });
+   }
 
    db().adjust_balance(op.seller, -op.amount_to_sell);
 
@@ -117,7 +130,10 @@ object_id_type limit_order_create_evaluator::do_apply(const limit_order_create_o
    else
       filled = db().apply_order( new_order_object );
 
-   FC_ASSERT( !op.fill_or_kill || filled );
+   GRAPHENE_ASSERT( !op.fill_or_kill || filled,
+                    limit_order_create_kill_unfilled,
+                    "Killing limit order ${op} due to unable to fill",
+                    ("op",op) );
 
    return order_id;
 } FC_CAPTURE_AND_RETHROW( (op) ) }
@@ -126,8 +142,17 @@ void_result limit_order_cancel_evaluator::do_evaluate(const limit_order_cancel_o
 { try {
    database& d = db();
 
-   _order = &o.order(d);
-   FC_ASSERT( _order->seller == o.fee_paying_account );
+   _order = d.find( o.order );
+
+   GRAPHENE_ASSERT( _order != nullptr,
+                    limit_order_cancel_nonexist_order,
+                    "Limit order ${oid} does not exist",
+                    ("oid", o.order) );
+
+   GRAPHENE_ASSERT( _order->seller == o.fee_paying_account,
+                    limit_order_cancel_owner_mismatch,
+                    "Limit order ${oid} is owned by someone else",
+                    ("oid", o.order) );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -157,15 +182,28 @@ void_result call_order_update_evaluator::do_evaluate(const call_order_update_ope
 { try {
    database& d = db();
 
-   // TODO: remove this check and the assertion after hf_834
-   if( d.get_dynamic_global_properties().next_maintenance_time <= HARDFORK_CORE_834_TIME )
-      FC_ASSERT( !o.extensions.value.target_collateral_ratio.valid(),
-                 "Can not set target_collateral_ratio in call_order_update_operation before hardfork 834." );
+   auto next_maintenance_time = d.get_dynamic_global_properties().next_maintenance_time;
 
    _paying_account = &o.funding_account(d);
    _debt_asset     = &o.delta_debt.asset_id(d);
    FC_ASSERT( _debt_asset->is_market_issued(), "Unable to cover ${sym} as it is not a collateralized asset.",
               ("sym", _debt_asset->symbol) );
+
+   FC_ASSERT( o.delta_debt.amount <= 0 || _debt_asset->can_create_new_supply(), "Can not create new supply" );
+
+   _dynamic_data_obj = &_debt_asset->dynamic_asset_data_id(d);
+
+   /***
+    * There are instances of assets exceeding max_supply before hf 1465, therefore this code must remain.
+    */
+   if (next_maintenance_time > HARDFORK_CORE_1465_TIME)
+   {
+      FC_ASSERT( _dynamic_data_obj->current_supply + o.delta_debt.amount <= _debt_asset->options.max_supply,
+            "Borrowing this quantity would exceed MAX_SUPPLY" );
+   }
+   
+   FC_ASSERT( _dynamic_data_obj->current_supply + o.delta_debt.amount >= 0,
+         "This transaction would bring current supply below zero.");
 
    _bitasset_data  = &_debt_asset->bitasset_data(d);
 
@@ -198,9 +236,8 @@ object_id_type call_order_update_evaluator::do_apply(const call_order_update_ope
       d.adjust_balance( o.funding_account, o.delta_debt );
 
       // Deduct the debt paid from the total supply of the debt asset.
-      d.modify(_debt_asset->dynamic_asset_data_id(d), [&](asset_dynamic_data_object& dynamic_asset) {
+      d.modify(*_dynamic_data_obj, [&](asset_dynamic_data_object& dynamic_asset) {
          dynamic_asset.current_supply += o.delta_debt.amount;
-         FC_ASSERT(dynamic_asset.current_supply >= 0);
       });
    }
 
@@ -217,6 +254,9 @@ object_id_type call_order_update_evaluator::do_apply(const call_order_update_ope
       }
    }
 
+   const auto next_maint_time = d.get_dynamic_global_properties().next_maintenance_time;
+   bool before_core_hardfork_1270 = ( next_maint_time <= HARDFORK_CORE_1270_TIME ); // call price caching issue
+
    auto& call_idx = d.get_index_type<call_order_index>().indices().get<by_account>();
    auto itr = call_idx.find( boost::make_tuple(o.funding_account, o.delta_debt.asset_id) );
    const call_order_object* call_obj = nullptr;
@@ -230,12 +270,15 @@ object_id_type call_order_update_evaluator::do_apply(const call_order_update_ope
       FC_ASSERT( o.delta_collateral.amount > 0, "Delta collateral amount of new debt position should be positive" );
       FC_ASSERT( o.delta_debt.amount > 0, "Delta debt amount of new debt position should be positive" );
 
-      call_obj = &d.create<call_order_object>( [&o,this]( call_order_object& call ){
+      call_obj = &d.create<call_order_object>( [&o,this,before_core_hardfork_1270]( call_order_object& call ){
          call.borrower = o.funding_account;
          call.collateral = o.delta_collateral.amount;
          call.debt = o.delta_debt.amount;
-         call.call_price = price::call_price(o.delta_debt, o.delta_collateral,
-                                             _bitasset_data->current_feed.maintenance_collateral_ratio);
+         if( before_core_hardfork_1270 ) // before core-1270 hard fork, calculate call_price here and cache it
+            call.call_price = price::call_price( o.delta_debt, o.delta_collateral,
+                                                 _bitasset_data->current_feed.maintenance_collateral_ratio );
+         else // after core-1270 hard fork, set call_price to 1
+            call.call_price = price( asset( 1, o.delta_collateral.asset_id ), asset( 1, o.delta_debt.asset_id ) );
          call.target_collateral_ratio = o.extensions.value.target_collateral_ratio;
       });
       call_order_id = call_obj->id;
@@ -260,11 +303,14 @@ object_id_type call_order_update_evaluator::do_apply(const call_order_update_ope
       old_collateralization = call_obj->collateralization();
       old_debt = call_obj->debt;
 
-      d.modify( *call_obj, [&o,new_debt,new_collateral,this]( call_order_object& call ){
+      d.modify( *call_obj, [&o,new_debt,new_collateral,this,before_core_hardfork_1270]( call_order_object& call ){
          call.collateral = new_collateral;
          call.debt       = new_debt;
-         call.call_price = price::call_price( call.get_debt(), call.get_collateral(),
-                                              _bitasset_data->current_feed.maintenance_collateral_ratio );
+         if( before_core_hardfork_1270 ) // don't update call_price after core-1270 hard fork
+         {
+            call.call_price  =  price::call_price( call.get_debt(), call.get_collateral(),
+                                                   _bitasset_data->current_feed.maintenance_collateral_ratio );
+         }
          call.target_collateral_ratio = o.extensions.value.target_collateral_ratio;
       });
    }
@@ -287,8 +333,7 @@ object_id_type call_order_update_evaluator::do_apply(const call_order_update_ope
          GRAPHENE_ASSERT(
             !call_obj,
             call_order_update_unfilled_margin_call,
-            "Updating call order would trigger a margin call that cannot be fully filled",
-            ("a", ~call_obj->call_price )("b", _bitasset_data->current_feed.settlement_price)
+            "Updating call order would trigger a margin call that cannot be fully filled"
             );
       }
       else
@@ -296,19 +341,23 @@ object_id_type call_order_update_evaluator::do_apply(const call_order_update_ope
          call_obj = d.find(call_order_id);
          // we know no black swan event has occurred
          FC_ASSERT( call_obj, "no margin call was executed and yet the call object was deleted" );
-         if( d.head_block_time() <= HARDFORK_CORE_583_TIME ) // TODO remove after hard fork core-583
+         // this HF must remain as-is, as the assert inside the "if" was triggered during push_proposal()
+         if( d.head_block_time() <= HARDFORK_CORE_583_TIME )
          {
             // We didn't fill any call orders.  This may be because we
             // aren't in margin call territory, or it may be because there
             // were no matching orders.  In the latter case, we throw.
             GRAPHENE_ASSERT(
+               // we know core-583 hard fork is before core-1270 hard fork, it's ok to use call_price here
                ~call_obj->call_price < _bitasset_data->current_feed.settlement_price,
                call_order_update_unfilled_margin_call,
                "Updating call order would trigger a margin call that cannot be fully filled",
+               // we know core-583 hard fork is before core-1270 hard fork, it's ok to use call_price here
                ("a", ~call_obj->call_price )("b", _bitasset_data->current_feed.settlement_price)
                );
          }
-         else // after hard fork, always allow call order to be updated if collateral ratio is increased and debt is not increased
+         else // after hard fork core-583, always allow call order to be updated if collateral ratio
+              // is increased and debt is not increased
          {
             // We didn't fill any call orders.  This may be because we
             // aren't in margin call territory, or it may be because there
@@ -316,13 +365,21 @@ object_id_type call_order_update_evaluator::do_apply(const call_order_update_ope
             // if collateral ratio is not increased or debt is increased, we throw.
             // be here, we know no margin call was executed,
             // so call_obj's collateral ratio should be set only by op
-            FC_ASSERT( ( old_collateralization.valid() && call_obj->debt <= *old_debt
-                                                       && call_obj->collateralization() > *old_collateralization )
-                       || ~call_obj->call_price < _bitasset_data->current_feed.settlement_price,
-               "Can only increase collateral ratio without increasing debt if would trigger a margin call that "
-               "cannot be fully filled",
-               ("new_call_price", ~call_obj->call_price )
-               ("settlement_price", _bitasset_data->current_feed.settlement_price)
+            // ------
+            // Before BSIP77, CR of the new/updated position is required to be above MCR;
+            // after BSIP77, CR of the new/updated position is required to be above max(ICR,MCR).
+            // The `current_initial_collateralization` variable has been initialized according to the logic,
+            // so we directly use it here.
+            bool check = ( !before_core_hardfork_1270
+                            && call_obj->collateralization() > _bitasset_data->current_initial_collateralization )
+                       || ( before_core_hardfork_1270
+                            && ~call_obj->call_price < _bitasset_data->current_feed.settlement_price )
+                       || ( old_collateralization.valid() && call_obj->debt <= *old_debt
+                                                          && call_obj->collateralization() > *old_collateralization );
+            FC_ASSERT( check,
+               "Can only increase collateral ratio without increasing debt when the debt position's "
+               "collateral ratio is lower than required initial collateral ratio (ICR), "
+               "if not to trigger a margin call that be fully filled immediately",
                ("old_debt", old_debt)
                ("new_debt", call_obj->debt)
                ("old_collateralization", old_collateralization)
@@ -354,13 +411,6 @@ void_result bid_collateral_evaluator::do_evaluate(const bid_collateral_operation
 
    FC_ASSERT( !_bitasset_data->is_prediction_market, "Cannot bid on a prediction market!" );
 
-   if( o.additional_collateral.amount > 0 )
-   {
-      FC_ASSERT( d.get_balance(*_paying_account, _bitasset_data->options.short_backing_asset(d)) >= o.additional_collateral,
-                 "Cannot bid ${c} collateral when payer only has ${b}", ("c", o.additional_collateral.amount)
-                 ("b", d.get_balance(*_paying_account, o.additional_collateral.asset_id(d)).amount) );
-   }
-
    const collateral_bid_index& bids = d.get_index_type<collateral_bid_index>();
    const auto& index = bids.indices().get<by_account>();
    const auto& bid = index.find( boost::make_tuple( o.debt_covered.asset_id, o.bidder ) );
@@ -368,6 +418,22 @@ void_result bid_collateral_evaluator::do_evaluate(const bid_collateral_operation
       _bid = &(*bid);
    else
        FC_ASSERT( o.debt_covered.amount > 0, "Can't find bid to cancel?!");
+
+   if( o.additional_collateral.amount > 0 )
+   {
+      if( _bid && d.head_block_time() >= HARDFORK_CORE_1692_TIME ) // TODO: see if HF check can be removed after HF
+      {
+         asset delta = o.additional_collateral - _bid->get_additional_collateral();
+         FC_ASSERT( d.get_balance(*_paying_account, _bitasset_data->options.short_backing_asset(d)) >= delta,
+                    "Cannot increase bid from ${oc} to ${nc} collateral when payer only has ${b}",
+                    ("oc", _bid->get_additional_collateral().amount)("nc", o.additional_collateral.amount)
+                    ("b", d.get_balance(*_paying_account, o.additional_collateral.asset_id(d)).amount) );
+      } else
+         FC_ASSERT( d.get_balance( *_paying_account,
+                                   _bitasset_data->options.short_backing_asset(d) ) >= o.additional_collateral,
+                    "Cannot bid ${c} collateral when payer only has ${b}", ("c", o.additional_collateral.amount)
+                    ("b", d.get_balance(*_paying_account, o.additional_collateral.asset_id(d)).amount) );
+   }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }

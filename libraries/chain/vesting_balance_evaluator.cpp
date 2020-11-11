@@ -26,6 +26,7 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/vesting_balance_evaluator.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
+#include <graphene/chain/hardfork.hpp>
 
 namespace graphene { namespace chain {
 
@@ -76,6 +77,12 @@ struct init_policy_visitor
       policy.coin_seconds_earned_last_update = now;
       p = policy;
    }
+
+   void operator()( const instant_vesting_policy_initializer& i )const
+   {
+      p = instant_vesting_policy{};
+   }
+
 };
 
 object_id_type vesting_balance_create_evaluator::do_apply( const vesting_balance_create_operation& op )

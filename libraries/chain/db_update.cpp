@@ -28,15 +28,15 @@
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
-#include <graphene/chain/transaction_object.hpp>
+#include <graphene/chain/ticket_object.hpp>
+#include <graphene/chain/transaction_history_object.hpp>
 #include <graphene/chain/withdraw_permission_object.hpp>
 #include <graphene/chain/witness_object.hpp>
 
-#include <graphene/chain/protocol/fee_schedule.hpp>
-
-#include <fc/uint128.hpp>
+#include <graphene/protocol/fee_schedule.hpp>
 
 namespace graphene { namespace chain {
 
@@ -144,7 +144,8 @@ void database::clear_expired_transactions()
 { try {
    //Look for expired transactions in the deduplication list, and remove them.
    //Transactions must have expired by at least two forking windows in order to be removed.
-   auto& transaction_idx = static_cast<transaction_index&>(get_mutable_index(implementation_ids, impl_transaction_object_type));
+   auto& transaction_idx = static_cast<transaction_index&>(get_mutable_index(implementation_ids,
+                                                                             impl_transaction_history_object_type));
    const auto& dedupe_index = transaction_idx.indices().get<by_expiration>();
    while( (!dedupe_index.empty()) && (head_block_time() > dedupe_index.begin()->trx.expiration) )
       transaction_idx.remove(*dedupe_index.begin());
@@ -191,23 +192,40 @@ bool database::check_for_blackswan( const asset_object& mia, bool enable_black_s
     auto settle_price = bitasset.current_feed.settlement_price;
     if( settle_price.is_null() ) return false; // no feed
 
-    const call_order_index& call_index = get_index_type<call_order_index>();
-    const auto& call_price_index = call_index.indices().get<by_price>();
+    const call_order_object* call_ptr = nullptr; // place holder for the call order with least collateral ratio
 
-    auto call_min = price::min( bitasset.options.short_backing_asset, mia.id );
-    auto call_max = price::max( bitasset.options.short_backing_asset, mia.id );
-    auto call_itr = call_price_index.lower_bound( call_min );
-    auto call_end = call_price_index.upper_bound( call_max );
+    asset_id_type debt_asset_id = mia.id;
+    auto call_min = price::min( bitasset.options.short_backing_asset, debt_asset_id );
 
-    if( call_itr == call_end ) return false;  // no call orders
+    auto maint_time = get_dynamic_global_properties().next_maintenance_time;
+    bool before_core_hardfork_1270 = ( maint_time <= HARDFORK_CORE_1270_TIME ); // call price caching issue
+
+    if( before_core_hardfork_1270 ) // before core-1270 hard fork, check with call_price
+    {
+       const auto& call_price_index = get_index_type<call_order_index>().indices().get<by_price>();
+       auto call_itr = call_price_index.lower_bound( call_min );
+       if( call_itr == call_price_index.end() ) // no call order
+          return false;
+       call_ptr = &(*call_itr);
+    }
+    else // after core-1270 hard fork, check with collateralization
+    {
+       const auto& call_collateral_index = get_index_type<call_order_index>().indices().get<by_collateral>();
+       auto call_itr = call_collateral_index.lower_bound( call_min );
+       if( call_itr == call_collateral_index.end() ) // no call order
+          return false;
+       call_ptr = &(*call_itr);
+    }
+    if( call_ptr->debt_type() != debt_asset_id ) // no call order
+       return false;
 
     price highest = settle_price;
-
-    const auto& dyn_prop = get_dynamic_global_properties();
-    auto maint_time = dyn_prop.next_maintenance_time;
-    if( maint_time > HARDFORK_CORE_338_TIME )
+    if( maint_time > HARDFORK_CORE_1270_TIME )
        // due to #338, we won't check for black swan on incoming limit order, so need to check with MSSP here
        highest = bitasset.current_feed.max_short_squeeze_price();
+    else if( maint_time > HARDFORK_CORE_338_TIME )
+       // due to #338, we won't check for black swan on incoming limit order, so need to check with MSSP here
+       highest = bitasset.current_feed.max_short_squeeze_price_before_hf_1270();
 
     const limit_order_index& limit_index = get_index_type<limit_order_index>();
     const auto& limit_price_index = limit_index.indices().get<by_price>();
@@ -227,10 +245,10 @@ bool database::check_for_blackswan( const asset_object& mia, bool enable_black_s
        highest = std::max( limit_itr->sell_price, highest );
     }
 
-    auto least_collateral = call_itr->collateralization();
+    auto least_collateral = call_ptr->collateralization();
     if( ~least_collateral >= highest  ) 
     {
-       wdump( (*call_itr) );
+       wdump( (*call_ptr) );
        elog( "Black Swan detected on asset ${symbol} (${id}) at block ${b}: \n"
              "   Least collateralized call: ${lc}  ${~lc}\n"
            //  "   Highest Bid:               ${hb}  ${~hb}\n"
@@ -362,6 +380,13 @@ void database::clear_expired_orders()
             cancel_settle_order(order);
             continue;
          }
+         if( GRAPHENE_100_PERCENT == mia.options.force_settlement_offset_percent ) // settle something for nothing
+         {
+            ilog( "Canceling a force settlement in ${asset} because settlement offset is 100%",
+                  ("asset", mia_object.symbol));
+            cancel_settle_order(order);
+            continue;
+         }
          if( max_settlement_volume.asset_id != current_asset )
             max_settlement_volume = mia_object.amount(mia.max_force_settlement_volume(mia_object.dynamic_data(*this).current_supply));
          // When current_asset_finished is true, this would be the 2nd time processing the same order.
@@ -393,9 +418,9 @@ void database::clear_expired_orders()
          {
             auto& pays = order.balance;
             auto receives = (order.balance * mia.current_feed.settlement_price);
-            receives.amount = ( fc::uint128_t(receives.amount.value) *
+            receives.amount = static_cast<uint64_t>( fc::uint128_t(receives.amount.value) *
                                 (GRAPHENE_100_PERCENT - mia.options.force_settlement_offset_percent) /
-                                GRAPHENE_100_PERCENT ).to_uint64();
+                                GRAPHENE_100_PERCENT );
             assert(receives <= order.balance * mia.current_feed.settlement_price);
             settlement_price = pays / receives;
          }
@@ -459,6 +484,7 @@ void database::clear_expired_orders()
 void database::update_expired_feeds()
 {
    const auto head_time = head_block_time();
+   const auto next_maint_time = get_dynamic_global_properties().next_maintenance_time;
    bool after_hardfork_615 = ( head_time >= HARDFORK_615_TIME );
 
    const auto& idx = get_index_type<asset_bitasset_data_index>().indices().get<by_feed_expiration>();
@@ -473,9 +499,9 @@ void database::update_expired_feeds()
       if( after_hardfork_615 || b.feed_is_expired_before_hardfork_615( head_time ) )
       {
          auto old_median_feed = b.current_feed;
-         modify( b, [head_time,&update_cer]( asset_bitasset_data_object& abdo )
+         modify( b, [head_time,next_maint_time,&update_cer]( asset_bitasset_data_object& abdo )
          {
-            abdo.update_median_feeds( head_time );
+            abdo.update_median_feeds( head_time, next_maint_time );
             if( abdo.need_to_update_cer() )
             {
                update_cer = true;
@@ -483,7 +509,8 @@ void database::update_expired_feeds()
                abdo.feed_cer_updated = false;
             }
          });
-         if( !b.current_feed.settlement_price.is_null() && !( b.current_feed == old_median_feed ) ) // `==` check is safe here
+         if( !b.current_feed.settlement_price.is_null()
+               && !b.current_feed.margin_call_params_equal( old_median_feed ) )
          {
             asset_ptr = &b.asset_id( *this );
             check_call_orders( *asset_ptr, true, false, &b );
@@ -556,6 +583,118 @@ void database::update_withdraw_permissions()
    auto& permit_index = get_index_type<withdraw_permission_index>().indices().get<by_expiration>();
    while( !permit_index.empty() && permit_index.begin()->expiration <= head_block_time() )
       remove(*permit_index.begin());
+}
+
+void database::clear_expired_htlcs()
+{
+   const auto& htlc_idx = get_index_type<htlc_index>().indices().get<by_expiration>();
+   while ( htlc_idx.begin() != htlc_idx.end()
+         && htlc_idx.begin()->conditions.time_lock.expiration <= head_block_time() )
+   {
+      const htlc_object& obj = *htlc_idx.begin();
+      const auto amount = asset(obj.transfer.amount, obj.transfer.asset_id);
+      adjust_balance( obj.transfer.from, amount );
+      // notify related parties
+      htlc_refund_operation vop( obj.id, obj.transfer.from, obj.transfer.to, amount,
+         obj.conditions.hash_lock.preimage_hash, obj.conditions.hash_lock.preimage_size );
+      push_applied_operation( vop );
+      remove( obj );
+   }
+}
+
+generic_operation_result database::process_tickets()
+{
+   const auto maint_time = get_dynamic_global_properties().next_maintenance_time;
+   ticket_version version = ( HARDFORK_CORE_2262_PASSED(maint_time) ? ticket_v2 : ticket_v1 );
+
+   generic_operation_result result;
+   share_type total_delta_pob;
+   share_type total_delta_inactive;
+   auto& idx = get_index_type<ticket_index>().indices().get<by_next_update>();
+   while( !idx.empty() && idx.begin()->next_auto_update_time <= head_block_time() )
+   {
+      const ticket_object& ticket = *idx.begin();
+      const auto& stat = get_account_stats_by_owner( ticket.account );
+      if( ticket.status == withdrawing && ticket.current_type == liquid )
+      {
+         adjust_balance( ticket.account, ticket.amount );
+         // Note: amount.asset_id is checked when creating the ticket, so no check here
+         modify( stat, [&ticket](account_statistics_object& aso) {
+            aso.total_core_pol -= ticket.amount.amount;
+            aso.total_pol_value -= ticket.value;
+         });
+         result.removed_objects.insert( ticket.id );
+         remove( ticket );
+      }
+      else
+      {
+         ticket_type old_type = ticket.current_type;
+         share_type old_value = ticket.value;
+         modify( ticket, [version]( ticket_object& o ) {
+            o.auto_update( version );
+         });
+         result.updated_objects.insert( ticket.id );
+
+         share_type delta_inactive_amount;
+         share_type delta_forever_amount;
+         share_type delta_forever_value;
+         share_type delta_other_amount;
+         share_type delta_other_value;
+
+         if( old_type == lock_forever ) // It implies that the new type is lock_forever too
+         {
+            if( ticket.value == 0 )
+            {
+               total_delta_pob -= ticket.amount.amount;
+               total_delta_inactive += ticket.amount.amount;
+               delta_inactive_amount = ticket.amount.amount;
+               delta_forever_amount = -ticket.amount.amount;
+            }
+            delta_forever_value = ticket.value - old_value;
+         }
+         else // old_type != lock_forever
+         {
+            if( ticket.current_type == lock_forever )
+            {
+               total_delta_pob += ticket.amount.amount;
+               delta_forever_amount = ticket.amount.amount;
+               delta_forever_value = ticket.value;
+               delta_other_amount = -ticket.amount.amount;
+               delta_other_value = -old_value;
+            }
+            else // ticket.current_type != lock_forever
+            {
+               delta_other_value = ticket.value - old_value;
+            }
+         }
+
+         // Note: amount.asset_id is checked when creating the ticket, so no check here
+         modify( stat, [delta_inactive_amount,delta_forever_amount,delta_forever_value,
+                        delta_other_amount,delta_other_value](account_statistics_object& aso) {
+            aso.total_core_inactive += delta_inactive_amount;
+            aso.total_core_pob += delta_forever_amount;
+            aso.total_core_pol += delta_other_amount;
+            aso.total_pob_value += delta_forever_value;
+            aso.total_pol_value += delta_other_value;
+         });
+
+      }
+      // TODO if a lock_forever ticket lost all the value, remove it
+   }
+
+   // TODO merge stable tickets with the same account and the same type
+
+   // Update global data
+   if( total_delta_pob != 0 || total_delta_inactive != 0 )
+   {
+      modify( get_dynamic_global_properties(),
+              [total_delta_pob,total_delta_inactive]( dynamic_global_property_object& dgp ) {
+         dgp.total_pob += total_delta_pob;
+         dgp.total_inactive += total_delta_inactive;
+      });
+   }
+
+   return result;
 }
 
 } }

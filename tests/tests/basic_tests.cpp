@@ -231,7 +231,7 @@ BOOST_AUTO_TEST_CASE( price_test )
     more_than_min.base.amount = 11;
     BOOST_CHECK( more_than_min * ratio_type(1,7) == price(asset(1),asset(more_than_min.quote.amount*7/11,asset_id_type(1))) );
     more_than_min.base.amount = 64823;
-    BOOST_CHECK( more_than_min * ratio_type(31672,102472047) == price(asset(1),asset((fc::uint128(more_than_min.quote.amount.value)*102472047/(64823*31672)).to_uint64(),asset_id_type(1))) );
+    BOOST_CHECK( more_than_min * ratio_type(31672,102472047) == price(asset(1),asset(static_cast<uint64_t>(fc::uint128_t(more_than_min.quote.amount.value)*102472047/(64823*31672)),asset_id_type(1))) );
     more_than_min.base.amount = 13;
     BOOST_CHECK( more_than_min * ratio_type(202472059,3) == price(asset((int64_t(13)*202472059)>>1),asset((more_than_min.quote.amount.value*3)>>1,asset_id_type(1))) ); // after >>1, quote = max*1.5, but gcd = 3, so quote/=3 = max/2, less than max
 
@@ -291,7 +291,29 @@ BOOST_AUTO_TEST_CASE( price_test )
     dummy.maximum_short_squeeze_ratio = 1234;
     dummy.settlement_price = price(asset(1000), asset(2000, asset_id_type(1)));
     price_feed dummy2 = dummy;
-    BOOST_CHECK(dummy == dummy2);
+    price_feed dummy3 = dummy;
+    dummy3.core_exchange_rate = price( asset(11), asset(13, asset_id_type(1)) );
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy ) );
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy2 ) );
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy3 ) );
+    dummy.maximum_short_squeeze_ratio = 1235;
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy ) );
+    BOOST_CHECK( !dummy.margin_call_params_equal( dummy2 ) );
+    BOOST_CHECK( !dummy.margin_call_params_equal( dummy3 ) );
+    dummy2.maximum_short_squeeze_ratio = 1235;
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy ) );
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy2 ) );
+    BOOST_CHECK( !dummy.margin_call_params_equal( dummy3 ) );
+    dummy2.maintenance_collateral_ratio = 1003;
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy ) );
+    BOOST_CHECK( !dummy.margin_call_params_equal( dummy2 ) );
+    BOOST_CHECK( !dummy.margin_call_params_equal( dummy3 ) );
+    dummy3.maximum_short_squeeze_ratio = 1235;
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy3 ) );
+    dummy3.settlement_price = price( asset(1), asset(3, asset_id_type(1)) );
+    BOOST_CHECK( !dummy.margin_call_params_equal( dummy3 ) );
+    dummy3.settlement_price = price( asset(1), asset(2, asset_id_type(1)) );
+    BOOST_CHECK( dummy.margin_call_params_equal( dummy3 ) );
 }
 
 BOOST_AUTO_TEST_CASE( price_multiplication_test )
@@ -408,7 +430,7 @@ BOOST_AUTO_TEST_CASE( scaled_precision )
 
 BOOST_AUTO_TEST_CASE( merkle_root )
 {
-   signed_block block;
+   clearable_block block;
    vector<processed_transaction> tx;
    vector<digest_type> t;
    const uint32_t num_tx = 10;
@@ -444,6 +466,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dA = d(t[0], t[1]);
 
    block.transactions.push_back( tx[1] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dA) );
 
    /*
@@ -458,6 +481,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dI = d(dA, dB);
 
    block.transactions.push_back( tx[2] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dI) );
 
    /*
@@ -472,6 +496,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dI = d(dA, dB);
 
    block.transactions.push_back( tx[3] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dI) );
 
    /*
@@ -489,6 +514,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dM = d(dI, dJ);
 
    block.transactions.push_back( tx[4] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dM) );
 
    /*
@@ -506,6 +532,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dM = d(dI, dJ);
 
    block.transactions.push_back( tx[5] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dM) );
 
    /*
@@ -523,6 +550,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dM = d(dI, dJ);
 
    block.transactions.push_back( tx[6] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dM) );
 
    /*
@@ -540,6 +568,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dM = d(dI, dJ);
 
    block.transactions.push_back( tx[7] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dM) );
 
    /*
@@ -560,6 +589,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dO = d(dM, dN);
 
    block.transactions.push_back( tx[8] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dO) );
 
    /*
@@ -580,6 +610,7 @@ BOOST_AUTO_TEST_CASE( merkle_root )
    dO = d(dM, dN);
 
    block.transactions.push_back( tx[9] );
+   block.clear();
    BOOST_CHECK( block.calculate_merkle_root() == c(dO) );
 }
 

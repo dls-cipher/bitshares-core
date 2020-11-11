@@ -22,8 +22,7 @@
  * THE SOFTWARE.
  */
 #pragma once
-#include <graphene/chain/protocol/types.hpp>
-#include <graphene/db/object.hpp>
+#include <graphene/protocol/types.hpp>
 #include <graphene/db/generic_index.hpp>
 
 namespace graphene { namespace chain {
@@ -54,13 +53,11 @@ struct budget_record
    share_type supply_delta = 0;
 };
 
-class budget_record_object;
-
 class budget_record_object : public graphene::db::abstract_object<budget_record_object>
 {
    public:
-      static const uint8_t space_id = implementation_ids;
-      static const uint8_t type_id = impl_budget_record_object_type;
+      static constexpr uint8_t space_id = implementation_ids;
+      static constexpr uint8_t type_id = impl_budget_record_object_type;
 
       fc::time_point_sec time;
       budget_record record;
@@ -68,23 +65,10 @@ class budget_record_object : public graphene::db::abstract_object<budget_record_
 
 } }
 
-FC_REFLECT(
-   graphene::chain::budget_record,
-   (time_since_last_budget)
-   (from_initial_reserve)
-   (from_accumulated_fees)
-   (from_unused_witness_budget)
-   (requested_witness_budget)
-   (total_budget)
-   (witness_budget)
-   (worker_budget)
-   (leftover_worker_funds)
-   (supply_delta)
-)
+MAP_OBJECT_ID_TO_TYPE(graphene::chain::budget_record_object)
 
-FC_REFLECT_DERIVED(
-   graphene::chain::budget_record_object,
-   (graphene::db::object),
-   (time)
-   (record)
-)
+FC_REFLECT_TYPENAME( graphene::chain::budget_record )
+FC_REFLECT_TYPENAME( graphene::chain::budget_record_object )
+
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::budget_record )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::budget_record_object )

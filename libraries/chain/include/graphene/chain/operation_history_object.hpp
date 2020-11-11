@@ -22,8 +22,10 @@
  * THE SOFTWARE.
  */
 #pragma once
-#include <graphene/chain/protocol/operations.hpp>
+
+#include <graphene/protocol/operations.hpp>
 #include <graphene/db/object.hpp>
+
 #include <boost/multi_index/composite_key.hpp>
 
 namespace graphene { namespace chain {
@@ -46,8 +48,8 @@ namespace graphene { namespace chain {
    class operation_history_object : public abstract_object<operation_history_object>
    {
       public:
-         static const uint8_t space_id = protocol_ids;
-         static const uint8_t type_id  = operation_history_object_type;
+         static constexpr uint8_t space_id = protocol_ids;
+         static constexpr uint8_t type_id  = operation_history_object_type;
 
          operation_history_object( const operation& o ):op(o){}
          operation_history_object(){}
@@ -61,7 +63,7 @@ namespace graphene { namespace chain {
          /** the operation within the transaction */
          uint16_t          op_in_trx = 0;
          /** any virtual operations implied by operation in block */
-         uint16_t          virtual_op = 0;
+         uint32_t          virtual_op = 0;
    };
 
    /**
@@ -88,18 +90,13 @@ namespace graphene { namespace chain {
    class account_transaction_history_object :  public abstract_object<account_transaction_history_object>
    {
       public:
-         static const uint8_t space_id = implementation_ids;
-         static const uint8_t type_id  = impl_account_transaction_history_object_type;
+         static constexpr uint8_t space_id = implementation_ids;
+         static constexpr uint8_t type_id  = impl_account_transaction_history_object_type;
          account_id_type                      account; /// the account this operation applies to
          operation_history_id_type            operation_id;
          uint64_t                             sequence = 0; /// the operation position within the given account
          account_transaction_history_id_type  next;
-
-         //std::pair<account_id_type,operation_history_id_type>  account_op()const  { return std::tie( account, operation_id ); }
-         //std::pair<account_id_type,uint32_t>                   account_seq()const { return std::tie( account, sequence );     }
    };
-
-   struct by_id;
 
    typedef multi_index_container<
       operation_history_object,
@@ -141,8 +138,11 @@ namespace graphene { namespace chain {
 
 } } // graphene::chain
 
-FC_REFLECT_DERIVED( graphene::chain::operation_history_object, (graphene::chain::object),
-                    (op)(result)(block_num)(trx_in_block)(op_in_trx)(virtual_op) )
+MAP_OBJECT_ID_TO_TYPE(graphene::chain::operation_history_object)
+MAP_OBJECT_ID_TO_TYPE(graphene::chain::account_transaction_history_object)
 
-FC_REFLECT_DERIVED( graphene::chain::account_transaction_history_object, (graphene::chain::object),
-                    (account)(operation_id)(sequence)(next) )
+FC_REFLECT_TYPENAME( graphene::chain::operation_history_object )
+FC_REFLECT_TYPENAME( graphene::chain::account_transaction_history_object )
+
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::operation_history_object )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::account_transaction_history_object )
